@@ -62,14 +62,14 @@ class AE(nn.Module):
         enc_h1 = F.relu(self.enc_1(x))
         enc_h2 = F.relu(self.enc_2(enc_h1))
        # enc_h3 = F.relu(self.enc_3(enc_h2))
-        z = self.z_layer(enc_h2)
+        z = self.z_layer(enc_h2)  #降维数据
         # decoder
        # dec_h1 = F.relu(self.dec_1(z))
         dec_h2 = F.relu(self.dec_2(z))
         dec_h3 = F.relu(self.dec_3(dec_h2))
-        x_bar = self.x_bar_layer(dec_h3)
+        x_bar = self.x_bar_layer(dec_h3)   #重构数据
 
-        return x_bar, z
+        return x_bar, z   #返回降维数据和重构数据
 
 
 
@@ -84,9 +84,9 @@ class IDEC(nn.Module):
                  n_dec_3,
                  n_input,
                  n_z,
-                 n_clusters,
-                 alpha=1,
-                 pretrain_path='data/ae_pre.pkl'):
+                 n_clusters,   #聚类中心个数
+                 alpha=1,      #k-means算法的超参数alpha
+                 pretrain_path='data/ae_pre.pkl'):  #表示自编码器预训练的权重路径
         super(IDEC, self).__init__()
         self.alpha = 1.0
         self.pretrain_path = pretrain_path  #预训练路径
@@ -101,10 +101,10 @@ class IDEC(nn.Module):
             n_input=n_input,
             n_z=n_z)
         # cluster layer
-        self.cluster_layer = Parameter(torch.Tensor(n_clusters, n_z))
-        torch.nn.init.xavier_normal_(self.cluster_layer.data)
+        self.cluster_layer = Parameter(torch.Tensor(n_clusters, n_z))   #n_clusters表示期望聚类的数量，n_z表示编码器输出的特征向量的维数
+        torch.nn.init.xavier_normal_(self.cluster_layer.data)  #随机初始化self.cluster_layer中的元素
 
-    def pretrain(self, path=''):   #预训练
+    def pretrain(self, path=''):   #预训练,如果 path 参数为空，则调用 pretrain_ae 函数对 AE 进行预训练。如果 path 参数不为空，则会从指定路径加载预训练模型的权重。加载完成后，打印一条日志信息表示已经完成预训练。
         if path == '':
             pretrain_ae(self.ae)
         # load pretrain weights
@@ -117,19 +117,19 @@ class IDEC(nn.Module):
         # cluster
         q = 1.0 / (1.0 + torch.sum(
             torch.pow(z.unsqueeze(1) - self.cluster_layer, 2), 2) / self.alpha)
-        q = q.pow((self.alpha + 1.0) / 2.0)
-        q = (q.t() / torch.sum(q, 1)).t()
-        return x_bar, q
+        q = q.pow((self.alpha + 1.0) / 2.0)   #这一行代码对概率q进行了指数平滑的处理，以确保概率值具有更强的表现力
+        q = (q.t() / torch.sum(q, 1)).t()   #对概率值q进行标准化处理，确保每个样本点的概率值之和为1
+        return x_bar, q   #重构值x_bar和聚类概率q，用于计算聚类损失和重构损失
 
 
-def target_distribution(q):
+def target_distribution(q):    #q 聚类概率,返回目标分布矩阵。目标分布矩阵是一个与聚类簇数目相同的矩阵，用于指导EM算法的聚类过程
     weight = q**2 / q.sum(0)
-    return (weight.t() / weight.sum(1)).t()
+    return (weight.t() / weight.sum(1)).t()  #.t()转置
 
 
 def pretrain_ae(model):
     '''
-    pretrain autoencoder
+    pretrain autoencoder  预训练自编码器
     '''
     train_loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True)
     print("??")
@@ -137,7 +137,7 @@ def pretrain_ae(model):
     optimizer = Adam(model.parameters(), lr=args.lr)
     for epoch in range(args.pretrain_epochs):
         total_loss = 0.
-        for batch_idx, (x, _) in enumerate(train_loader):
+        for batch_idx, (x, _) in enumerate(train_loader):  # x 是输入数据，_ 是对应的标签（因为这里不需要用到标签，所以用 _ 占位），因为是无监督学习
             x = x.to(device)
 
             optimizer.zero_grad()
