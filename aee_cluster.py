@@ -24,7 +24,7 @@ import matplotlib.pyplot as plt
 #from sklearn import metrics
 from sklearn.metrics import silhouette_score, davies_bouldin_score
 from utils import MnistDataset
-seed = 1   #种子
+seed = 2   #种子
 import torch.backends.cudnn as cudnn
 cudnn.deterministic = True
 cudnn.benchmark = True
@@ -40,40 +40,54 @@ class AE(nn.Module):
     def __init__(self, n_enc_1, n_enc_2, n_enc_3, n_dec_1, n_dec_2, n_dec_3,
                  n_input, n_z):
         super(AE, self).__init__()
-
         # encoder
-        self.enc_1 = Linear(n_input, n_enc_1)
-        self.enc_2 = Linear(n_enc_1, n_enc_2)
-       # self.enc_3 = Linear(n_enc_2, n_enc_3)
-
-        self.z_layer = Linear(n_enc_2, n_z)
-
-        # decoder
-        # self.dec_1 = Linear(n_z, n_dec_1)
-        self.dec_2 = Linear(n_z, n_dec_2)
-        self.dec_3 = Linear(n_dec_2, n_dec_3)
-
-        self.x_bar_layer = Linear(n_dec_3, n_input)
+        self.z_layer=nn.Sequential(
+            Linear(n_input, n_enc_1),
+            nn.ReLU(),
+            Linear(n_enc_1, n_enc_2),
+            nn.ReLU(),
+            Linear(n_enc_2, n_z),
+            #nn.ReLU(),
+            #Linear(n_dec_3,n_z)
+        )
+       # decoder
+        self.x_bar_layer=nn.Sequential(
+            #Linear(n_z, n_dec_1),
+            #nn.ReLU(),
+            Linear(n_z, n_dec_2),
+            nn.ReLU(),
+            Linear(n_dec_2, n_dec_3),
+            nn.ReLU(),
+            Linear(n_dec_3,n_input)
+        )
 
     def forward(self, x):
-
         # encoder
         x = x + torch.randn(x.size())*0.1
-        enc_h1 = F.relu(self.enc_1(x))
-        enc_h2 = F.relu(self.enc_2(enc_h1))
-       # enc_h3 = F.relu(self.enc_3(enc_h2))
-        z = self.z_layer(enc_h2)  #降维数据
+
+        z = self.z_layer(x)  #降维数据
+
         # decoder
-       # dec_h1 = F.relu(self.dec_1(z))
-        dec_h2 = F.relu(self.dec_2(z))
-        dec_h3 = F.relu(self.dec_3(dec_h2))
-        x_bar = self.x_bar_layer(dec_h3)   #重构数据
+        x_bar = self.x_bar_layer(z)   #重构数据
 
         return x_bar, z   #返回降维数据和重构数据
 
+#定义判别器网络
+class Discriminator(nn.Module):
+    def __init__(self, n_z):
+        super(Discriminator, self).__init__()
+        self.fc1 = nn.Linear(n_z, 128)
+        self.fc2 = nn.Linear(128, 1)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        x = nn.functional.relu(self.fc1(x))
+        x = nn.functional.relu(self.fc2(x))
+        x = self.sigmoid(x)
+        return x
 
 
-class IDEC(nn.Module):
+class AAE_Cluster(nn.Module):
 
     def __init__(self,
                  n_enc_1,
@@ -85,11 +99,13 @@ class IDEC(nn.Module):
                  n_input,
                  n_z,
                  n_clusters,   #聚类中心个数
-                 alpha=1,      #k-means算法的超参数alpha
-                 pretrain_path='data/ae_pre.pkl'):  #表示自编码器预训练的权重路径
-        super(IDEC, self).__init__()
-        self.alpha = 1.0
+                 alpha=1.0,      #k-means算法的超参数alpha
+                 pretrain_path='data/ae_pre.pkl',
+                 pretrain_path2='data/d_pre.pkl'):  #表示自编码器预训练的权重路径
+        super(AAE_Cluster, self).__init__()
+        self.alpha = alpha
         self.pretrain_path = pretrain_path  #预训练路径
+        self.pretrain_path2 = pretrain_path2  #预训练路径
 
         self.ae = AE(
             n_enc_1=n_enc_1,
@@ -100,6 +116,9 @@ class IDEC(nn.Module):
             n_dec_3=n_dec_3,
             n_input=n_input,
             n_z=n_z)
+
+        self.discriminator=Discriminator(n_z)
+
         # cluster layer
         self.cluster_layer = Parameter(torch.Tensor(n_clusters, n_z))   #n_clusters表示期望聚类的数量，n_z表示编码器输出的特征向量的维数
         torch.nn.init.xavier_normal_(self.cluster_layer.data)  #随机初始化self.cluster_layer中的元素
@@ -107,19 +126,24 @@ class IDEC(nn.Module):
     def pretrain(self, path=''):   #预训练,如果 path 参数为空，则调用 pretrain_ae 函数对 AE 进行预训练。如果 path 参数不为空，则会从指定路径加载预训练模型的权重。加载完成后，打印一条日志信息表示已经完成预训练。
         if path == '':
             pretrain_ae(self.ae)
+            pretrain_d(self.ae,self.discriminator)
         # load pretrain weights
         self.ae.load_state_dict(torch.load(self.pretrain_path))
+        self.discriminator.load_state_dict(torch.load(self.pretrain_path2))
         print('load pretrained ae from', path)
+        print('load pretrained d from', path)
+
 
     def forward(self, x):
 
         x_bar, z = self.ae(x)
+        d_z = self.discriminator(z)
         # cluster
         q = 1.0 / (1.0 + torch.sum(
             torch.pow(z.unsqueeze(1) - self.cluster_layer, 2), 2) / self.alpha)
         q = q.pow((self.alpha + 1.0) / 2.0)   #这一行代码对概率q进行了指数平滑的处理，以确保概率值具有更强的表现力
         q = (q.t() / torch.sum(q, 1)).t()   #对概率值q进行标准化处理，确保每个样本点的概率值之和为1
-        return x_bar, q   #重构值x_bar和聚类概率q，用于计算聚类损失和重构损失
+        return x_bar, q, d_z   #重构值x_bar，聚类概率q，判别网络的标量d_z,用于计算聚类损失和重构损失
 
 
 def target_distribution(q):    #q 聚类概率,返回目标分布矩阵。目标分布矩阵是一个与聚类簇数目相同的矩阵，用于指导EM算法的聚类过程
@@ -154,9 +178,36 @@ def pretrain_ae(model):
     print("model saved to {}.".format(args.pretrain_path))
 
 
-def train_idec():
+def pretrain_d(model1,model2):  #model1为ae,model2为判别器
+    '''
+    pretrain d  预训练自编码器
+    '''
+    train_loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True)
+    print("??")
+    print(model2)
+    optimizer = Adam(model2.parameters(), lr=args.lr)
+    for epoch in range(args.pretrain_epochs):
+        loss = 0.
+        for batch_idx, (x, _) in enumerate(train_loader):
+            x = x.to(device)
+            x = x.view(x.size(0), -1)
+            z_fake = model1.z_layer(x).detach()
+            z_real = torch.randn(x.size(0), 50)
+            loss_fake = nn.functional.binary_cross_entropy(model2(z_fake), torch.zeros(x.size(0),1))
+            loss_real = nn.functional.binary_cross_entropy(model2(z_real), torch.ones(x.size(0),1))
+            loss = loss_fake + loss_real
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+        print("epoch {} loss={:.4f}".format(epoch,
+                                            loss / (batch_idx + 1)))
+        torch.save(model2.state_dict(), args.pretrain_path2)
+    print("model saved to {}.".format(args.pretrain_path2))
 
-    model = IDEC(
+
+def train_aee_cluster():
+
+    model = AAE_Cluster(
         n_enc_1=500,
         n_enc_2=100,
         n_enc_3=20,
@@ -167,7 +218,9 @@ def train_idec():
         n_z=args.n_z,
         n_clusters=args.n_clusters,
         alpha=1.0,
-        pretrain_path=args.pretrain_path).to(device)
+        pretrain_path=args.pretrain_path,
+        pretrain_path2=args.pretrain_path2).to(device)
+
 
     # model.pretrain('data/ae_pre.pkl') #直接读取保存的模型
     model.pretrain()  #  迁移学习
@@ -180,27 +233,27 @@ def train_idec():
     data = dataset.x
     # y = dataset.y
     data = torch.Tensor(data).to(device)
-    x_bar, hidden = model.ae(data)
+    x_bar, hidden = model.ae(data)    #x_bar,z
 
-    kmeans = KMeans(n_clusters=args.n_clusters, n_init=20)
-    y_pred = kmeans.fit_predict(hidden.data.cpu().numpy())
-    silhouetteScore = silhouette_score(hidden.data.cpu().numpy(), y_pred, metric='euclidean')
-    davies_bouldinScore = davies_bouldin_score(hidden.data.cpu().numpy(), y_pred)
+    kmeans = KMeans(n_clusters=args.n_clusters, n_init=20)   #初始化一个K-means聚类器，并设置聚类数量为args.n_clusters，聚类中心的初始值将在进行20次随机初始化之后选取最优解
+    y_pred = kmeans.fit_predict(hidden.data.cpu().numpy())   #聚类中心编号y_pred
+    silhouetteScore = silhouette_score(hidden.data.cpu().numpy(), y_pred, metric='euclidean')  #计算聚类结果的轮廓系数(silhouette score)
+    davies_bouldinScore = davies_bouldin_score(hidden.data.cpu().numpy(), y_pred)  #计算Davies-Bouldin指数(Davies-Bouldin score)，也是一种聚类质量评估指标
 
     print("silhouetteScore={:.4f}".format(silhouetteScore),', davies_bouldinScore {:.4f}'.format(davies_bouldinScore))
 
     hidden = None
     x_bar = None
 
-    y_pred_last = y_pred
-    model.cluster_layer.data = torch.tensor(kmeans.cluster_centers_).to(device)
+    y_pred_last = y_pred  #将当前迭代的聚类结果y_pred存储在y_pred_last中，以备后续比较聚类结果的变化
+    model.cluster_layer.data = torch.tensor(kmeans.cluster_centers_).to(device)  #将K-means聚类器得到的聚类中心作为模型的聚类参数cluster_layer的初始化值
 
     model.train()
     for epoch in range(args.train_epochs):
 
         if epoch % args.update_interval == 0:
 
-            _, tmp_q = model(data)
+            _, tmp_q ,d_z= model(data)
             _, hidden = model.ae(data)
             # update target distribution p
             tmp_q = tmp_q.data
@@ -221,35 +274,8 @@ def train_idec():
             d = np.column_stack((hidden.data.cpu().numpy(), y_pred))
             # print(d.shape)
             np.savetxt(r'x_tsne.csv', d, delimiter=',')
-            # x1 = d[d[:, 2]==0]
-            # x2 = d[d[:, 2]==1]
-            # x3 = d[d[:, 2]==2]
-            # x4 = d[d[:, 2]==3]
-            # x5 = d[d[:, 2]==4]
-            # x6 = d[d[:, 2]==5]
-            # x7 = d[d[:, 2]==6]
-            # x8 = d[d[:, 2]==7]
-            # x9 = d[d[:, 2]==8]
-            # # print(x3.shape)
-            # #plt.scatter(hidden.data.cpu().numpy()[:, 0], hidden.data.cpu().numpy()[:, 1], c="red", marker='o', label='see')
-            # plt.scatter(x1[:, 0], x1[:, 1], c="red", marker='o', label='label0')
-            # plt.scatter(x2[:, 0], x2[:, 1], c="green", marker='*', label='label1')
-            # plt.scatter(x3[:, 0], x3[:, 1], c="blue", marker='+', label='label2')
-            # plt.scatter(x4[:, 0], x4[:, 1], c="yellow", marker='o', label='label0')
-            # plt.scatter(x5[:, 0], x5[:, 1], c="purple", marker='*', label='label1')
-            # plt.scatter(x6[:, 0], x6[:, 1], c="brown", marker='+', label='label2')
-            # plt.scatter(x7[:, 0], x7[:, 1], c="pink", marker='o', label='label0')
-            # plt.scatter(x8[:, 0], x8[:, 1], c="yellowgreen", marker='*', label='label1')
-            # plt.scatter(x9[:, 0], x9[:, 1], c="skyblue", marker='+', label='label2')
-            # plt.xlabel('petal length')
-            # plt.ylabel('petal width')
-            # plt.legend(loc=2)
-            # plt.savefig('brca.png')
-            # plt.show()
 
-            #print(y_pred)
 
-            #
             if epoch > 0 and delta_label < args.tol:
                 print('delta_label {:.4f}'.format(delta_label), '< tol',
                       args.tol)
@@ -263,12 +289,17 @@ def train_idec():
             # x1 = x.to(device)
             idx = idx.to(device)
             idx = idx.long()
-            x_bar, q = model(x1)
-
+            x_bar, q, d_z = model(x1)
             reconstr_loss = F.mse_loss(x_bar, x)
             kl_loss = F.kl_div(q, p[idx])
-            loss =  kl_loss + args.gamma * reconstr_loss
 
+            real_label = torch.ones(d_z.shape[0], 1).to(device)
+            fake_label = torch.zeros(d_z.shape[0], 1).to(device)
+            d_z_real_loss = F.binary_cross_entropy_with_logits(d_z, real_label)
+            d_z_fake_loss = F.binary_cross_entropy_with_logits(d_z, fake_label)
+            d_z_loss = d_z_real_loss + d_z_fake_loss
+
+            loss = kl_loss + args.gamma * reconstr_loss + args.beta * d_z_loss
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -286,11 +317,17 @@ if __name__ == "__main__":
     parser.add_argument('--n_z', default=2, type=int)
     parser.add_argument('--dataset', type=str, default='mnist')
     parser.add_argument('--pretrain_path', type=str, default='data/ae_pre')
+    parser.add_argument('--pretrain_path2', type=str, default='data/d_pre')
     parser.add_argument(
         '--gamma',
         default=0.5,
         type=float,
-        help='coefficient of clustering loss')
+        help='coefficient of clustering loss')   #聚类损失
+    parser.add_argument(
+        '--beta',
+        default=0.5,
+        type=float,
+        help='coefficient of d loss')  # 判别器损失
     parser.add_argument('--update_interval', default=1, type=int)
     parser.add_argument('--tol', default=0.001, type=float)
     parser.add_argument('--pretrain_epochs', default=50, type=int)
@@ -302,12 +339,14 @@ if __name__ == "__main__":
 
     if args.dataset == 'mnist':
         args.pretrain_path = 'data/ae_pre.pkl'
+        args.pretrain_path2 = 'data/d_pre.pkl'
         args.n_clusters = 2
         dataset = MnistDataset()
         args.pretrain_epochs = 10  #(2,5,10,20)
         args.train_epochs = 15    #(5,10,20,40,50)
         args.n_z = 50             #(5,10,20,50)
         args.gamma = 0.1            #(1,0.1,0.5,2,10)
+        args.beta = 0.5             #(0-1)
         args.n_input = dataset.x.shape[1]
         args.tol = 0#.05#
         args.lr = 0.001           #(0.01,0.001,0.0001)
@@ -318,7 +357,7 @@ if __name__ == "__main__":
 
 
     # np.savetxt(r'x.csv', dataset.x, delimiter=',')
-    train_idec()
+    train_aee_cluster()
 
 
 import matplotlib.pyplot as plt
